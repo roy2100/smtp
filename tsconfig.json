@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["smtp.ts", "smtp.test.ts"]
+  "include": ["smtp.ts", "smtp.test.ts", "examples/**/*.ts"]
 }

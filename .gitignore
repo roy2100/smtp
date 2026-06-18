@@ -143,3 +143,4 @@ vite.config.ts.timestamp-*
 .vite/
 
 go-go1.26.4
+config.json
