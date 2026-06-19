@@ -973,11 +973,18 @@ function upgradeToTLS(
 ): Promise<tls.TLSSocket> {
   return new Promise((resolve, reject) => {
     const { ServerName, ...rest } = config;
-    const tlsSock = tls.connect({
+    const opts: tls.ConnectionOptions = {
       socket,
-      servername: ServerName,
       ...(rest as tls.ConnectionOptions),
-    });
+    };
+    // RFC 6066 forbids IP literals in the SNI extension; Node warns (DEP0123)
+    // and will eventually ignore them. Pass an IP via `host` (used for cert
+    // identity verification against the IP SAN) rather than `servername`.
+    if (ServerName) {
+      if (net.isIP(ServerName)) opts.host = ServerName;
+      else opts.servername = ServerName;
+    }
+    const tlsSock = tls.connect(opts);
     tlsSock.once("secureConnect", () => resolve(tlsSock));
     tlsSock.once("error", reject);
   });
