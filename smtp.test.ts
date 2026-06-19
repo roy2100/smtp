@@ -1,11 +1,12 @@
 // Port of Go's net/smtp smtp_test.go (Go 1.26.4) to the node:test runner.
 // Run with: node --test   (Node.js >= 24 strips the TypeScript types natively)
 //
-// Per the migration decision, the three real-TLS integration tests
-// (TestNewClientWithTLS, TestTLSClient, TestTLSConnState) are omitted; the
-// in-memory protocol tests and the non-TLS real-socket SendMail tests are kept.
+// The three real-TLS integration tests (TestNewClientWithTLS, TestTLSClient,
+// TestTLSConnState) are ported faithfully against an in-process TLS server using
+// the same embedded localhost cert/key as the Go suite.
 
 import * as net from "node:net";
+import * as tls from "node:tls";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
@@ -18,10 +19,12 @@ import {
   ServerInfo,
   PlainAuth,
   CRAMMD5Auth,
+  Dial,
   NewClient,
   SendMail,
+  testHooks,
 } from "./smtp.ts";
-import type { Auth } from "./smtp.ts";
+import type { Auth, TLSConfig } from "./smtp.ts";
 
 // crlf mirrors strings.Join(strings.Split(s, "\n"), "\r\n").
 function crlf(s: string): string {
@@ -731,9 +734,236 @@ test("TestAuthFailed", async () => {
 });
 
 // -----------------------------------------------------------------------------
-// Omitted real-TLS integration tests (trimmed scope)
+// Real-TLS integration tests
 // -----------------------------------------------------------------------------
 
-test("TestNewClientWithTLS", { skip: "real-TLS integration test omitted (trimmed scope)" }, () => {});
-test("TestTLSClient", { skip: "real-TLS integration test omitted (trimmed scope)" }, () => {});
-test("TestTLSConnState", { skip: "real-TLS integration test omitted (trimmed scope)" }, () => {});
+// localhostCert is a PEM-encoded TLS cert generated from src/crypto/tls:
+//
+//	go run generate_cert.go --rsa-bits 2048 --host 127.0.0.1,::1,example.com \
+//		--ca --start-date "Jan 1 00:00:00 1970" --duration=1000000h
+//
+// The cert is valid from 1970 until ~2084, so default time verification works.
+const localhostCert = `-----BEGIN CERTIFICATE-----
+MIIDOjCCAiKgAwIBAgIRAM1/4MS0P4BXstjv50eeEsswDQYJKoZIhvcNAQELBQAw
+EjEQMA4GA1UEChMHQWNtZSBDbzAgFw03MDAxMDEwMDAwMDBaGA8yMDg0MDEyOTE2
+MDAwMFowEjEQMA4GA1UEChMHQWNtZSBDbzCCASIwDQYJKoZIhvcNAQEBBQADggEP
+ADCCAQoCggEBAN5KVxPqz+h6hHC3QBg7ZwCZUql4Mbz7LvrYg+1CCRJnbWdK2MTP
+s0Hi3CKzAEE6H52rPO1kqdcIo2D1Pw2PC7/TB6w8ASLumJQaZfBlbaZesbBfrtIu
+iEtSKs/Iwxp57mn9RbjUkQgu3nSzjrgbFPrktz6lJ4LfC6azN62klkCTfspCDTjU
+Sk58dlygIweYkIiWHAh5f+KvKT1aeheNMkLEx1KZ+Vz+Y/oEnEKjRxBcnUIwzIrZ
+/fXbvRq8Fa9nLuDO8F0JDcM1Zg9gzPvFmdFy8fifC3H/uflcLVJp4ImtEWEoVPvt
+OQLAwkulknsXACBVsCu/JgDU7Yda6Lk2Qq0CAwEAAaOBiDCBhTAOBgNVHQ8BAf8E
+BAMCAqQwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDwYDVR0TAQH/BAUwAwEB/zAdBgNV
+HQ4EFgQU3YcFHBnqY6c03/Ydoy94fa59+F8wLgYDVR0RBCcwJYILZXhhbXBsZS5j
+b22HBH8AAAGHEAAAAAAAAAAAAAAAAAAAAAEwDQYJKoZIhvcNAQELBQADggEBANI7
+DKO8ub7SOwesjcnt4fCfHumink2ixo2nxW/DpnNWBaAhA529HCAa7BgAFzQi/ES1
+ALEFEr0Phad4KA+9qrQXIJsMV/GTPPsTVuluU9Uhq6V2M8YelQuoMDbnjZDWcdZV
+0arpMdVT8vU4eOE7XWlo83gA08+1mX4WbEI5XaHDeKE4ogifCGamroOTzJidfMg/
+tz01iclVt7Fkri6PYcUS+8ySYrc2XH+h1P2xZCNP8VhAsrpnqQqGS85TTSUkOgZt
+ITQpEVnLIDwZSX0zYrN5z8gChVhzzMR8XmsOpMUBJL5qcpWrqy/ZswmsMvjVXmeN
+zQLoXduc3BgLtaXv7O0=
+-----END CERTIFICATE-----`;
+
+// localhostKey is the private key for localhostCert (Go's testingKey rewrites
+// "TESTING KEY" to "PRIVATE KEY"; the substituted form is stored here).
+const localhostKey = `-----BEGIN RSA PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDeSlcT6s/oeoRw
+t0AYO2cAmVKpeDG8+y762IPtQgkSZ21nStjEz7NB4twiswBBOh+dqzztZKnXCKNg
+9T8Njwu/0wesPAEi7piUGmXwZW2mXrGwX67SLohLUirPyMMaee5p/UW41JEILt50
+s464GxT65Lc+pSeC3wumszetpJZAk37KQg041EpOfHZcoCMHmJCIlhwIeX/iryk9
+WnoXjTJCxMdSmflc/mP6BJxCo0cQXJ1CMMyK2f31270avBWvZy7gzvBdCQ3DNWYP
+YMz7xZnRcvH4nwtx/7n5XC1SaeCJrRFhKFT77TkCwMJLpZJ7FwAgVbArvyYA1O2H
+Wui5NkKtAgMBAAECggEAG4ZS//lcYyoAikB2pEl+uJlDng5vAjqMF62FsHQz0V6T
+Mm4XJ0+cn7TqkzVc+7apwYk5kx+a1DCSomfbtd8XklocIhyP+3ZV2EjohHrat/YT
+xIYkjIwMfl8fQ/lVB0s/1UnyPy+7AatkCklNi8h2sZZuhkhG+zKJK8wXQd4WaMpf
+lcIaDijMdu0UTxUO+rISbjVpfL6HswTDUan6LhhxSa9F3zesLqgClKZIqzR8HCtM
+83QwK+kiW00D3pVZT4qHfFouoPrszP/qm/17wjxBmk83rKKsF2AnmipBaHR+MHou
+tCarJV35//h6z6m0VnAdrYhREif34s8H0pYbKng8oQKBgQD2lCbQu7W/FDu+D4u2
+F9wXdjZGplwUHaldfMUsMvawMSt86JYg9yVCHPFnWLhCBYT9Q1B1biqXu5YHwvyi
+F/SCVDBaN1pLAkNF5i3McgA2Zw9TbFwinJFpZSa5hSdBiZgpaFZj0KhJqA2ayaSQ
+wbTt1aN2oix1wdd9VU7cb5v6GQKBgQDmyJ5JUee6Vc6r/iucO4JkTijzwfPkSqOc
+zC7YmcWAE8oTWZf5ozM4vtuUhAyrfiHBaT8uUbyb3+E6MqRrZJmaAPEk9ALOvmZC
+vSZD5htzzUsLi7bR7e9PJjXoT+3V1EB3VyHnMv6LCbx/vSs/XI8VrahlDoJAW4rP
+UgGE703HtQKBgQCeIaLG6CqFMQejOrsBe0m1biUep9+TMvaDstmMH97eXZojD9H/
+sB+fx4n1GguIo5uHBB1cQdtk1XNA5QY5OZ2f2zfrE2Z/hiL4d8ZVP6LtQKiuemaX
+98q1SZ5NCZyERiZkH7qPZqgWHIUlCD3Wa7OJdyHOmfBjUH3Ord/WNGlWOQKBgQCv
+RLVRoa6HSRuIa6PbJybD3sgjN61uN3FCZ588SKxBtMXHJEfTAyqncet5Q0AMDeK8
+7J1bJCBFkSWP+V39YY119Dkvg1GOifNHxDcHYf5/V+4iep0Bmd4hEjfmkq1hs6yx
+9a5907CVD3Pk31m06SqRoC0/cmFhVyR4hyM4PjWn8QKBgFz97Xe4VlllQ4v1lY3g
+1LXoF3oVBAcIiDOfnJuJKKUNJuQPfp7Z2/gisX/8RDPO+iBqKesUQxTKC2v6MOue
+YMR7L8AAn1wBFU5dioARmfBcVWBOpMZIHzHUqsnTqGzuIPTfnaZWxz13PbBxEiGS
++NeMNAdZn3grwXTdcD3VBVHs
+-----END RSA PRIVATE KEY-----`;
+
+// Mirror Go's init(): testHookStartTLS injects the test root CA. Node verifies
+// against `ca`; the cert's 1970-2084 validity makes the default time work, so
+// (unlike Go) no config.Time override is needed.
+testHooks.startTLS = (config: TLSConfig) => {
+  config.ca = localhostCert;
+};
+
+// serverHandle is an SMTP server finely tailored to deal with our own client
+// only (Go's serverHandle): it speaks plaintext, advertises STARTTLS, upgrades
+// the raw socket to TLS, then defers to serverHandleTLS.
+async function serverHandle(socket: net.Socket): Promise<void> {
+  const sc = new SocketConn(socket);
+  const tc = new Conn(sc);
+  await tc.PrintfLine("%s", ["220 127.0.0.1 ESMTP service ready"]);
+  for (;;) {
+    let line: string;
+    try {
+      line = await tc.ReadLine();
+    } catch {
+      return; // EOF
+    }
+    switch (line) {
+      case "EHLO localhost":
+        await tc.PrintfLine("%s", ["250-127.0.0.1 ESMTP offers a warm hug of welcome"]);
+        await tc.PrintfLine("%s", ["250-STARTTLS"]);
+        await tc.PrintfLine("%s", ["250 Ok"]);
+        break;
+      case "STARTTLS": {
+        await tc.PrintfLine("%s", ["220 Go ahead"]);
+        sc.detach();
+        const tlsSock = new tls.TLSSocket(socket, {
+          isServer: true,
+          key: localhostKey,
+          cert: localhostCert,
+        });
+        await new Promise<void>((res, rej) => {
+          tlsSock.once("secure", () => res());
+          tlsSock.once("error", rej);
+        });
+        return serverHandleTLS(tlsSock);
+      }
+      default:
+        throw new Error(`unrecognized command: ${JSON.stringify(line)}`);
+    }
+  }
+}
+
+async function serverHandleTLS(socket: tls.TLSSocket): Promise<void> {
+  const tc = new Conn(new SocketConn(socket));
+  for (;;) {
+    let line: string;
+    try {
+      line = await tc.ReadLine();
+    } catch {
+      return; // EOF
+    }
+    switch (line) {
+      case "EHLO localhost":
+        await tc.PrintfLine("%s", ["250 Ok"]);
+        break;
+      case "MAIL FROM:<joe1@example.com>":
+        await tc.PrintfLine("%s", ["250 Ok"]);
+        break;
+      case "RCPT TO:<joe2@example.com>":
+        await tc.PrintfLine("%s", ["250 Ok"]);
+        break;
+      case "DATA":
+        await tc.PrintfLine("%s", ["354 send the mail data, end with ."]);
+        await tc.PrintfLine("%s", ["250 Ok"]);
+        break;
+      case "Subject: test":
+      case "":
+      case "howdy!":
+      case ".":
+        break;
+      case "QUIT":
+        await tc.PrintfLine("%s", ["221 127.0.0.1 Service closing transmission channel"]);
+        return;
+      default:
+        throw new Error(`unrecognized command during TLS: ${JSON.stringify(line)}`);
+    }
+  }
+}
+
+function newLocalListener(): Promise<{ server: net.Server; address: string }> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const a = server.address() as net.AddressInfo;
+      resolve({ server, address: `127.0.0.1:${a.port}` });
+    });
+  });
+}
+
+// sendMail mirrors Go's sendMail helper used by TestTLSClient.
+function sendMail(hostPort: string): Promise<void> {
+  return SendMail(
+    hostPort,
+    null,
+    "joe1@example.com",
+    ["joe2@example.com"],
+    Buffer.from("Subject: test\n\nhowdy!"),
+  );
+}
+
+test("TestNewClientWithTLS", async () => {
+  const server = tls.createServer(
+    { key: localhostKey, cert: localhostCert },
+    (socket) => {
+      socket.write("220 SIGNS\r\n");
+    },
+  );
+  await new Promise<void>((res) => server.listen(0, "127.0.0.1", () => res()));
+  const a = server.address() as net.AddressInfo;
+
+  const tlsSock = await new Promise<tls.TLSSocket>((res, rej) => {
+    // config.InsecureSkipVerify = true on the Go side.
+    const s = tls.connect(
+      { host: "127.0.0.1", port: a.port, rejectUnauthorized: false },
+      () => res(s),
+    );
+    s.once("error", rej);
+  });
+
+  const client = await NewClient(new SocketConn(tlsSock), `127.0.0.1:${a.port}`);
+  assert.strictEqual(client.tls, true, "client.tls should be true over a TLS conn");
+
+  await client.Close();
+  tlsSock.destroy();
+  await new Promise<void>((res) => server.close(() => res()));
+});
+
+test("TestTLSClient", async () => {
+  const { server, address } = await newLocalListener();
+
+  const serverErr = new Promise<void>((resolve, reject) => {
+    server.once("connection", (socket) => {
+      serverHandle(socket).then(resolve, reject);
+    });
+  });
+
+  await sendMail(address);
+  await serverErr;
+
+  await new Promise<void>((res) => server.close(() => res()));
+});
+
+test("TestTLSConnState", async () => {
+  const { server, address } = await newLocalListener();
+
+  const serverErr = new Promise<void>((resolve, reject) => {
+    server.once("connection", (socket) => {
+      serverHandle(socket).then(resolve, reject);
+    });
+  });
+
+  const c = await Dial(address);
+  const cfg: TLSConfig = { ServerName: "example.com" };
+  testHooks.startTLS!(cfg); // set the RootCAs (Node: `ca`)
+  await c.StartTLS(cfg);
+
+  const [cs, ok] = c.TLSConnectionState();
+  assert.strictEqual(ok, true, "TLSConnectionState returned ok == false; want true");
+  assert.ok(
+    cs !== null && cs.version !== 0 && cs.handshakeComplete,
+    "expected non-zero Version and HandshakeComplete",
+  );
+
+  await c.Quit();
+  await serverErr;
+  await new Promise<void>((res) => server.close(() => res()));
+});

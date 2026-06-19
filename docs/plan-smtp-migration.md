@@ -111,3 +111,25 @@ How to run:
 - `npm install` (one-time, dev deps only)
 - `npm test` or `node --test`
 - To vendor: copy `smtp.ts` alone — it has no third-party imports.
+
+## Follow-up (2026-06-19): real-TLS tests filled in
+The three previously skipped real-TLS integration tests are now ported and
+passing, superseding the trimmed-scope decision above:
+- `TestNewClientWithTLS` — `tls.createServer` with the embedded localhost cert
+  writes the `220 SIGNS` greeting; the client `tls.connect`s with
+  `rejectUnauthorized: false` and asserts `NewClient` sets `client.tls`.
+- `TestTLSClient` — a plain `net` listener runs the ported `serverHandle` /
+  `serverHandleTLS` (advertise STARTTLS, upgrade the raw socket via
+  `new tls.TLSSocket({ isServer: true })`, then serve the mail exchange);
+  `sendMail` drives the real `SendMail` end-to-end through the TLS upgrade.
+- `TestTLSConnState` — `Dial` + `StartTLS(cfg)` then asserts
+  `TLSConnectionState()` reports a completed handshake.
+
+The embedded `localhostCert`/`localhostKey` (Go's PEM, with `TESTING KEY` →
+`PRIVATE KEY`) live in `smtp.test.ts`. Go's `testHookStartTLS` maps to the
+exported `testHooks.startTLS`, which injects the cert as Node's `ca` option; the
+cert's 1970–2084 validity means no `config.Time` override is needed. Result:
+**19 tests pass, 0 skipped**, `tsc --noEmit` clean. (Node prints a cosmetic
+`DEP0123` SNI-with-IP warning because the library faithfully passes
+`ServerName="127.0.0.1"` in `SendMail`; verification still succeeds via the
+cert's IP SAN.)

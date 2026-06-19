@@ -87,10 +87,12 @@ Everything is in one file, `smtp.ts`, layered bottom-up:
 `smtp.test.ts` ports `smtp_test.go` onto `node:test` + `node:assert/strict`. The
 `crlf()` helper mirrors Go's `strings.Join(strings.Split(s,"\n"),"\r\n")` for the
 inline server/client transcripts. The three real-TLS integration tests
-(`TestNewClientWithTLS`, `TestTLSClient`, `TestTLSConnState`) are intentionally
-present-but-skipped (see `docs/plan-smtp-migration.md` for the scope decision);
-`StartTLS`/`TLSConnectionState` are implemented but only exercised via the
-502-rejection path in `TestHello`.
+(`TestNewClientWithTLS`, `TestTLSClient`, `TestTLSConnState`) are ported against
+an in-process TLS server using the embedded localhost cert/key; they drive
+`StartTLS`/`TLSConnectionState` end-to-end (the 502-rejection path in `TestHello`
+also exercises `StartTLS`). Go's `testHookStartTLS` maps to the exported
+`testHooks.startTLS`, which injects the cert as Node's `ca` option. See
+`docs/plan-smtp-migration.md` for history.
 
 When a Go test string uses a backtick raw literal containing `\n` (a literal
 backslash-n, e.g. the `%q`-escaped error in `TestAuthFailed`), port it with
